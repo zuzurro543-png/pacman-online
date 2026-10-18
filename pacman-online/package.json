@@ -1,0 +1,9 @@
+{
+  "name": "pacman-online",
+  "version": "1.0.0",
+  "description": "Pac-Man nivel 1 multijugador: el anfitrión es Pac-Man, los invitados son fantasmas",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" },
+  "dependencies": { "nodemailer": "^6.9.14", "ws": "^8.18.0" }
+}

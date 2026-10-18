@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Pac-Man Online</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#000;color:#fff;font-family:"Courier New",monospace;display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:12px}
+  h1{color:#ffd800;letter-spacing:3px;margin:8px 0 14px;font-size:26px;text-align:center}
+  .card{background:#0b0b2a;border:2px solid #2121de;border-radius:10px;padding:18px;width:min(94vw,460px)}
+  .card label{display:block;margin:10px 0 4px;color:#9aa}
+  input,textarea{width:100%;background:#000;color:#fff;border:1px solid #2121de;border-radius:6px;padding:10px;font:inherit}
+  textarea{height:70px;resize:vertical}
+  button{background:#ffd800;color:#000;border:0;border-radius:6px;padding:11px 16px;font:inherit;font-weight:bold;cursor:pointer;margin-top:10px;width:100%}
+  button.sec{background:#2121de;color:#fff}
+  button:disabled{opacity:.4;cursor:default}
+  .row{display:flex;gap:8px}
+  .hidden{display:none!important}
+  .players div{padding:4px 0}
+  .dot{display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:8px}
+  #msg{margin-top:8px;color:#ffb852;min-height:18px;font-size:14px}
+  #hud{display:flex;justify-content:space-between;width:min(96vw,560px);font-size:15px;margin-bottom:6px}
+  canvas{width:min(96vw,560px);height:auto;image-rendering:pixelated;background:#000;touch-action:none}
+  #overlay{margin-top:10px;text-align:center;width:min(94vw,460px)}
+  .small{font-size:12px;color:#9aa;margin-top:6px}
+  .link{word-break:break-all;background:#000;border:1px dashed #2121de;padding:8px;border-radius:6px;font-size:13px}
+</style>
+</head>
+<body>
+<h1>👻 PAC-MAN ONLINE</h1>
+
+<div id="menu" class="card">
+  <div id="inviteBanner" class="hidden" style="margin-bottom:8px;color:#00ffff">Te invitaron a la sala <b id="invCode"></b>. Serás un <b>fantasma</b> 👻</div>
+  <label for="name">Tu nombre</label>
+  <input id="name" maxlength="14" placeholder="Ej. Carlos">
+  <button id="btnCreate">Crear partida (seré Pac-Man)</button>
+  <button id="btnJoin" class="hidden sec">Unirme como fantasma</button>
+  <div id="msg"></div>
+</div>
+
+<div id="lobby" class="card hidden">
+  <div><b>Sala:</b> <span id="lobCode" style="color:#ffd800;font-size:20px"></span></div>
+  <div class="small" id="roleInfo"></div>
+  <label>Jugadores</label>
+  <div class="players" id="players"></div>
+  <div id="hostTools" class="hidden">
+    <label>Enlace de invitación</label>
+    <div class="link" id="linkBox"></div>
+    <div class="row"><button class="sec" id="btnCopy">Copiar enlace</button></div>
+    <label>Invitar por correo (separa con comas)</label>
+    <textarea id="emails" placeholder="amigo1@correo.com, amigo2@correo.com"></textarea>
+    <button id="btnInvite" class="sec">✉ Enviar invitaciones</button>
+    <button id="btnStart" disabled>▶ Empezar (mín. 1 fantasma)</button>
+  </div>
+  <div id="guestWait" class="hidden small">Esperando a que el anfitrión empiece…</div>
+  <div id="lmsg" style="margin-top:8px;color:#ffb852;font-size:14px"></div>
+</div>
+
+<div id="game" class="hidden" style="display:flex;flex-direction:column;align-items:center">
+  <div id="hud"><span id="hScore"></span><span id="hRole"></span><span id="hLives"></span></div>
+  <canvas id="cv" width="448" height="496"></canvas>
+  <div id="overlay"></div>
+  <div class="small">Flechas o WASD · en móvil, desliza el dedo sobre el tablero</div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const T = 16, W = 28, H = 31;
+let ws, me = null, maze = null, pel = '', st = null, lobby = null, token = null, roomCode = null;
+const inviteRoom = (new URLSearchParams(location.search).get('room') || '').toUpperCase();
+
+// ---------- Menú ----------
+$('name').value = localStorage.getItem('pm_name') || '';
+if (inviteRoom) {
+  $('inviteBanner').classList.remove('hidden'); $('invCode').textContent = inviteRoom;
+  $('btnJoin').classList.remove('hidden'); $('btnCreate').classList.add('sec');
+}
+function connect(first) {
+  localStorage.setItem('pm_name', $('name').value);
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
+  ws.onopen = () => ws.send(JSON.stringify(first()));
+  ws.onmessage = e => onMsg(JSON.parse(e.data));
+  ws.onclose = () => { if (me) showFatal('Conexión perdida. Recarga la página.'); };
+}
+$('btnCreate').onclick = () => connect(() => ({ t: 'create', name: $('name').value }));
+$('btnJoin').onclick = () => connect(() => ({ t: 'join', room: inviteRoom, name: $('name').value }));
+
+function showFatal(text) {
+  $('menu').classList.remove('hidden'); $('lobby').classList.add('hidden'); $('game').classList.add('hidden');
+  $('msg').textContent = text; me = null;
+}
+
+function onMsg(m) {
+  if (m.t === 'error') { $('msg').textContent = m.msg; $('lmsg').textContent = m.msg; }
+  else if (m.t === 'closed') { showFatal('El anfitrión cerró la partida.'); }
+  else if (m.t === 'init') {
+    me = m; maze = m.maze; roomCode = m.room; token = m.token || null;
+    buildWalls();
+    $('menu').classList.add('hidden'); $('lobby').classList.remove('hidden');
+    $('lobCode').textContent = roomCode;
+    const host = me.role === 'pacman';
+    $('hostTools').classList.toggle('hidden', !host);
+    $('guestWait').classList.toggle('hidden', host);
+    $('roleInfo').textContent = host ? 'Eres PAC-MAN (anfitrión). Invita a tus amigos.' : 'Eres un FANTASMA. ¡Atrapa a Pac-Man!';
+    $('linkBox').textContent = `${location.origin}/?room=${roomCode}`;
+  }
+  else if (m.t === 'lobby') {
+    lobby = m;
+    $('players').innerHTML = `<div><span class="dot" style="background:#ffd800"></span>${esc(m.host)} (Pac-Man)</div>` +
+      m.players.map(p => `<div><span class="dot" style="background:${p.color}"></span>${esc(p.name)}</div>`).join('');
+    $('btnStart').disabled = m.players.length < 1;
+    if (m.state === 'lobby') { $('game').classList.add('hidden'); $('lobby').classList.remove('hidden'); st = null; }
+  }
+  else if (m.t === 'state') {
+    st = m; if (m.pel) pel = m.pel;
+    $('lobby').classList.add('hidden'); $('game').classList.remove('hidden');
+    updateHud();
+  }
+}
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+// ---------- Lobby ----------
+$('btnCopy').onclick = () => { navigator.clipboard.writeText($('linkBox').textContent); $('lmsg').textContent = 'Enlace copiado ✔'; };
+$('btnStart').onclick = () => ws.send(JSON.stringify({ t: 'start' }));
+$('btnInvite').onclick = async () => {
+  const emails = $('emails').value.split(/[,;\s]+/).filter(Boolean);
+  if (!emails.length) { $('lmsg').textContent = 'Escribe al menos un correo.'; return; }
+  $('lmsg').textContent = 'Enviando…';
+  try {
+    const r = await fetch('/api/invite', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: roomCode, token, emails }) });
+    const j = await r.json();
+    $('lmsg').textContent = j.message || '';
+    if (j.ok && j.mailto) {
+      const subj = encodeURIComponent('Te invito a cazar a Pac-Man 👻');
+      const body = encodeURIComponent(`Entra a mi partida de Pac-Man Online como fantasma:\n${j.link}\n\nCódigo: ${roomCode}`);
+      location.href = `mailto:${j.emails.join(',')}?subject=${subj}&body=${body}`;
+    }
+  } catch (e) { $('lmsg').textContent = 'No se pudo contactar al servidor.'; }
+};
+
+// ---------- Entrada ----------
+const KEYS = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right', w: 'up', s: 'down', a: 'left', d: 'right', W: 'up', S: 'down', A: 'left', D: 'right' };
+addEventListener('keydown', e => {
+  const d = KEYS[e.key];
+  if (d && st && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
+    e.preventDefault(); ws.send(JSON.stringify({ t: 'input', dir: d }));
+  }
+});
+let tx = 0, ty = 0;
+const cv = $('cv'), ctx = cv.getContext('2d');
+cv.addEventListener('touchstart', e => { tx = e.touches[0].clientX; ty = e.touches[0].clientY; }, { passive: true });
+cv.addEventListener('touchmove', e => {
+  const dx = e.touches[0].clientX - tx, dy = e.touches[0].clientY - ty;
+  if (Math.hypot(dx, dy) > 24) {
+    const d = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up');
+    ws.send(JSON.stringify({ t: 'input', dir: d })); tx = e.touches[0].clientX; ty = e.touches[0].clientY;
+  }
+}, { passive: true });
+
+function updateHud() {
+  $('hScore').textContent = 'PUNTOS ' + st.score;
+  $('hRole').textContent = me.role === 'pacman' ? 'TÚ: PAC-MAN' : 'TÚ: FANTASMA';
+  $('hLives').textContent = 'VIDAS ' + '●'.repeat(Math.max(st.lives, 0));
+  const o = $('overlay');
+  if (st.s === 'over') {
+    const w = st.winner === 'pacman' ? '¡Pac-Man se comió todo! 🟡' : '¡Los fantasmas acabaron con Pac-Man! 👻';
+    o.innerHTML = `<div style="color:#ffd800;font-size:18px;margin:8px 0">${w}</div>` +
+      (me.role === 'pacman' ? '<button id="again">Jugar de nuevo</button><button id="tolobby" class="sec">Volver a la sala</button>' : '<div class="small">Esperando al anfitrión…</div>');
+    if ($('again')) { $('again').onclick = () => ws.send(JSON.stringify({ t: 'start' })); $('tolobby').onclick = () => ws.send(JSON.stringify({ t: 'lobby' })); }
+  } else o.innerHTML = '';
+}
+
+// ---------- Dibujo ----------
+const walls = document.createElement('canvas'); walls.width = W * T; walls.height = H * T;
+function isWall(x, y) { return y >= 0 && y < H && x >= 0 && x < W && maze[y][x] === '#'; }
+function buildWalls() {
+  const c = walls.getContext('2d'); c.clearRect(0, 0, walls.width, walls.height);
+  c.strokeStyle = '#2121de'; c.lineWidth = 2; c.lineCap = 'round';
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const ch = maze[y][x], px = x * T, py = y * T;
+    if (ch === '-') { c.strokeStyle = '#ffb8ff'; c.beginPath(); c.moveTo(px, py + T / 2); c.lineTo(px + T, py + T / 2); c.stroke(); c.strokeStyle = '#2121de'; continue; }
+    if (ch !== '#') continue;
+    const e = (nx, ny, x1, y1, x2, y2) => { if (nx >= 0 && nx < W && ny >= 0 && ny < H && !isWall(nx, ny)) { c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke(); } };
+    e(x, y - 1, px + 3, py + 3, px + T - 3, py + 3);
+    e(x, y + 1, px + 3, py + T - 3, px + T - 3, py + T - 3);
+    e(x - 1, y, px + 3, py + 3, px + 3, py + T - 3);
+    e(x + 1, y, px + T - 3, py + 3, px + T - 3, py + T - 3);
+  }
+}
+
+const disp = {}; // posiciones suavizadas
+function smooth(key, tx_, ty_) {
+  let d = disp[key];
+  if (!d || Math.abs(d.x - tx_) > 3 || Math.abs(d.y - ty_) > 3) d = disp[key] = { x: tx_, y: ty_, last: 'right' };
+  d.x += (tx_ - d.x) * 0.4; d.y += (ty_ - d.y) * 0.4;
+  return d;
+}
+const ANG = { right: 0, down: Math.PI / 2, left: Math.PI, up: -Math.PI / 2 };
+
+function drawPac(x, y, dir, d) {
+  if (dir) d.last = dir;
+  const cx = x * T + T / 2, cy = y * T + T / 2, mouth = dir || st.s === 'ready' ? Math.abs(Math.sin(performance.now() / 90)) * 0.7 : 0.25;
+  const a = ANG[d.last];
+  ctx.fillStyle = '#ffd800'; ctx.beginPath(); ctx.moveTo(cx, cy);
+  if (st.s === 'dying') { const k = (performance.now() % 1500) / 1500 * Math.PI; ctx.arc(cx, cy, 7.5, -Math.PI / 2 + k, -Math.PI / 2 - k + Math.PI * 2); }
+  else ctx.arc(cx, cy, 7.5, a + mouth, a - mouth + Math.PI * 2);
+  ctx.closePath(); ctx.fill();
+}
+function drawGhost(g, d, mine) {
+  const cx = d.x * T + T / 2, cy = d.y * T + T / 2, r = 7.5;
+  if (g.d) d.last = g.d;
+  const flash = g.fr && st.fright < 2 && Math.floor(performance.now() / 200) % 2;
+  if (!g.e) {
+    ctx.fillStyle = g.fr ? (flash ? '#fff' : '#2121de') : g.c;
+    ctx.beginPath(); ctx.moveTo(cx - r, cy + r); ctx.lineTo(cx - r, cy); ctx.arc(cx, cy, r, Math.PI, 0); ctx.lineTo(cx + r, cy + r);
+    for (let i = 0; i < 3; i++) { const bx = cx + r - (i + 1) * (2 * r / 3); ctx.lineTo(cx + r - (i + 0.5) * (2 * r / 3), cy + r - 3); ctx.lineTo(bx, cy + r); }
+    ctx.closePath(); ctx.fill();
+  }
+  // ojos
+  const o = { right: [1.5, 0], left: [-1.5, 0], up: [0, -1.5], down: [0, 1.5] }[d.last] || [0, 0];
+  if (g.fr && !g.e) {
+    ctx.fillStyle = flash ? '#f00' : '#ffb8ae'; ctx.fillRect(cx - 4, cy - 2, 2, 2); ctx.fillRect(cx + 2, cy - 2, 2, 2);
+  } else {
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(cx - 3, cy - 2, 2.6, 0, 7); ctx.arc(cx + 3, cy - 2, 2.6, 0, 7); ctx.fill();
+    ctx.fillStyle = '#2121de'; ctx.beginPath(); ctx.arc(cx - 3 + o[0], cy - 2 + o[1], 1.3, 0, 7); ctx.arc(cx + 3 + o[0], cy - 2 + o[1], 1.3, 0, 7); ctx.fill();
+  }
+  ctx.font = '8px Courier New'; ctx.textAlign = 'center';
+  ctx.fillStyle = mine ? '#fff' : '#bbb'; ctx.fillText((mine ? '▼ ' : '') + g.n, cx, cy - r - 3);
+}
+
+function frame() {
+  requestAnimationFrame(frame);
+  if (!st || !maze) return;
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.drawImage(walls, 0, 0);
+  // pellets
+  const blink = Math.floor(performance.now() / 250) % 2;
+  for (let i = 0; i < pel.length; i++) {
+    const c = pel[i]; if (c === '_') continue;
+    const x = (i % W) * T + T / 2, y = Math.floor(i / W) * T + T / 2;
+    ctx.fillStyle = '#ffb8ae';
+    if (c === '.') ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
+    else if (blink) { ctx.beginPath(); ctx.arc(x, y, 5, 0, 7); ctx.fill(); }
+  }
+  const pd = smooth('pac', st.pac.x, st.pac.y);
+  drawPac(pd.x, pd.y, st.pac.d, pd);
+  for (const g of st.g) { const d = smooth(g.id, g.x, g.y); drawGhost(g, d, me.role === 'ghost' && g.id === me.id); }
+  ctx.textAlign = 'center'; ctx.font = 'bold 14px Courier New';
+  if (st.s === 'ready') { ctx.fillStyle = '#ffd800'; ctx.fillText('¡LISTO!', cv.width / 2, 17 * T + 12); }
+  if (st.s === 'over') { ctx.fillStyle = '#ff0000'; ctx.fillText('FIN DEL JUEGO', cv.width / 2, 17 * T + 12); }
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
